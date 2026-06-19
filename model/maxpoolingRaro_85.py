@@ -179,12 +179,12 @@ def make_loaders(cfg, device):
 
 
 def build_model(cfg, n_classes):
-    # Cada bloc: Conv(c_in→c_mid) + BN + ReLU + Conv(c_mid→c_out) + BN + ReLU
-    #            + MaxPool2d(2) + Dropout2d
     conv_layers = []
     c_in = 1
-    bias = not cfg["use_bn"]  # bias innecessari quan BN ja aprèn el seu offset
-    for c_mid, c_out in cfg["conv_blocks"]:
+    bias = not cfg["use_bn"]
+    n_blocks = len(cfg["conv_blocks"])
+
+    for i, (c_mid, c_out) in enumerate(cfg["conv_blocks"]):
         conv_layers.append(nn.Conv2d(c_in, c_mid, kernel_size=3, padding=1, bias=bias))
         if cfg["use_bn"]:
             conv_layers.append(nn.BatchNorm2d(c_mid))
@@ -193,7 +193,22 @@ def build_model(cfg, n_classes):
         if cfg["use_bn"]:
             conv_layers.append(nn.BatchNorm2d(c_out))
         conv_layers.append(nn.ReLU(inplace=True))
-        conv_layers.append(nn.MaxPool2d(2, 2))
+
+        # Bloc 1 i 2: MaxPool estàndard (sense paràmetres apresos).
+        # Bloc 3 (últim): conv strided 3×3 en lloc de MaxPool.
+        # Avantatge: la xarxa pot aprendre *com* fer el downsample,
+        # en lloc de fer-ho amb un màxim fix. Útil quan la resolució
+        # ja és petita (8×8 → 4×4) i perdre activacions pot doldre.
+        if i < n_blocks - 1:
+            conv_layers.append(nn.MaxPool2d(2, 2))
+        else:
+            conv_layers.append(
+                nn.Conv2d(c_out, c_out, kernel_size=3, stride=2, padding=1, bias=bias)
+            )
+            if cfg["use_bn"]:
+                conv_layers.append(nn.BatchNorm2d(c_out))
+            conv_layers.append(nn.ReLU(inplace=True))
+
         if cfg["dropout_conv"] > 0:
             conv_layers.append(nn.Dropout2d(cfg["dropout_conv"]))
         c_in = c_out
