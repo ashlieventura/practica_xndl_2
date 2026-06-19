@@ -1,12 +1,12 @@
 # cnn_iter.py — CNN modular per iterar arquitectura i hiperparàmetres
 #
-# Arquitectura base: VGG-style amb blocs de doble conv 3×3 + BN + MaxPool.
+# Arquitectura base: VGG-style amb blocs de doble conv 3×3 + BN + Conv stride=2.
 # Tot es controla des del dict CONFIG. Per experimentar, modifica:
 #   - conv_blocks: llista de (c_mid, c_out) — un element = un bloc complet
-#   - use_bn, dropout_conv, dropout_fc: regularització
-#   - head, fc_sizes: cap de classificació
-#   - optimizer, scheduler, lr, weight_decay: entrenament
-#   - augment: nivell d'augmentació de dades
+#   - dropout_conv, dropout_fc: regularització
+#   - fc_sizes: cap de classificació
+#   - lr, weight_decay: entrenament
+#   - reducelr_factor, reducelr_patience: scheduler
 
 import os, time, random
 import numpy as np
@@ -17,45 +17,40 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BASE_DIR)
+DATA_DIR = os.path.join(PROJECT_DIR, "dades", "dades")
+
 # ================================================================
 # CONFIG — modifica aquí per experimentar
 # ================================================================
 CONFIG = {
     # --- Dades ---
-    "data_dir":   "../dades",
+    "data_dir":   DATA_DIR,
     "batch_size": 512,
 
     # --- Arquitectura ---
     # Cada element (c_mid, c_out) defineix un bloc complet:
     #   Conv(c_in→c_mid, 3×3, pad=1) + BN + ReLU
     #   Conv(c_mid→c_out, 3×3, pad=1) + BN + ReLU
-    #   MaxPool2d(2) + Dropout2d(dropout_conv)
+    #   Conv(c_out→c_out, 3×3, pad=1, stride=2) + BN + ReLU  ← downsampling entrenable
+    #   Dropout2d(dropout_conv)
     # Entrada 32×32: cada bloc divideix la resolució per 2.
     "conv_blocks":  [(32, 64), (128, 128), (256, 256)],  # → 16×16 → 8×8 → 4×4
-    "use_bn":       True,
-    "dropout_conv": 0.1,
+    "dropout_conv": 0.2,
 
-    # Cap de classificació
-    # 'flatten': Flatten → FC → ... → n_classes
-    # 'gap':     GlobalAvgPool → FC → n_classes  (menys paràmetres, prova-ho)
-    "head":       "flatten",
+    # Cap de classificació: Flatten → FC → ... → n_classes
     "fc_sizes":   [512, 128],   # capes FC intermèdies; → n_classes s'afegeix sol
     "dropout_fc": 0.2,
 
     # --- Entrenament ---
     "lr":           1e-3,
-    "optimizer":    "adam",      # 'adam', 'adamw', 'sgd'
-    "weight_decay": 0.0,
-    "scheduler":    "reducelr",  # 'none', 'reducelr', 'onecycle', 'step'
+    "weight_decay": 0.0001,
     "reducelr_factor":   0.5,    # ReduceLROnPlateau: divideix lr per aquest factor
-    "reducelr_patience": 5,      # ReduceLROnPlateau: èpoques sense millora per activar
-    "label_smooth": 0.0,
+    "reducelr_patience": 2,      # ReduceLROnPlateau: èpoques sense millora per activar
+    "label_smooth": 0.05,
     "max_epochs":   40,
-    "time_limit":   5 * 60 - 15,
-
-    # --- Augmentació ---
-    # 'none' | 'light' | 'medium' | 'full'
-    "augment": "none",
+    "time_limit":   10 * 60,
 
     # --- Misc ---
     "seed": 0,
@@ -71,51 +66,14 @@ def set_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
-def make_transforms(augment):
-    base = [
+def make_loaders(cfg, device):
+    tf = transforms.Compose([
         transforms.Grayscale(num_output_channels=1),
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,)),
-    ]
-    if augment == "none":
-        train_tf = transforms.Compose(base)
-    elif augment == "light":
-        train_tf = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.RandomRotation(10),
-            transforms.RandomAffine(degrees=0, translate=(0.06, 0.06)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ])
-    elif augment == "medium":
-        train_tf = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.RandomRotation(20),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-        ])
-    elif augment == "full":
-        train_tf = transforms.Compose([
-            transforms.Grayscale(num_output_channels=1),
-            transforms.RandomRotation(20),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.RandomAffine(degrees=0, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-            transforms.ColorJitter(brightness=0.25, contrast=0.25),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5,), (0.5,)),
-            transforms.RandomErasing(p=0.2, scale=(0.02, 0.12)),
-        ])
-    else:
-        raise ValueError(f"augment desconegut: {augment!r}")
-    return train_tf, transforms.Compose(base)
-
-
-def make_loaders(cfg, device):
-    train_tf, eval_tf = make_transforms(cfg["augment"])
-    train_ds = datasets.ImageFolder(os.path.join(cfg["data_dir"], "train"), transform=train_tf)
-    val_ds   = datasets.ImageFolder(os.path.join(cfg["data_dir"], "val"),   transform=eval_tf)
+    ])
+    train_ds = datasets.ImageFolder(os.path.join(cfg["data_dir"], "train"), transform=tf)
+    val_ds   = datasets.ImageFolder(os.path.join(cfg["data_dir"], "val"),   transform=tf)
     pin = (device.type == "cuda")
     nw = 4 if device.type == "cuda" else 0
     train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True,
@@ -128,45 +86,41 @@ def make_loaders(cfg, device):
 
 
 def build_model(cfg, n_classes):
-    # Cada bloc: Conv(c_in→c_mid) + BN + ReLU + Conv(c_mid→c_out) + BN + ReLU
-    #            + MaxPool2d(2) + Dropout2d
+    # Cada bloc: Conv(c_in→c_mid) + BN + ReLU
+    #            Conv(c_mid→c_out) + BN + ReLU
+    #            Conv(c_out→c_out, stride=2) + BN + ReLU  ← downsampling entrenable
+    #            Dropout2d
     conv_layers = []
     c_in = 1
     for c_mid, c_out in cfg["conv_blocks"]:
-        conv_layers.append(nn.Conv2d(c_in, c_mid, kernel_size=3, padding=1))
-        if cfg["use_bn"]:
-            conv_layers.append(nn.BatchNorm2d(c_mid))
-        conv_layers.append(nn.ReLU(inplace=True))
-        conv_layers.append(nn.Conv2d(c_mid, c_out, kernel_size=3, padding=1))
-        if cfg["use_bn"]:
-            conv_layers.append(nn.BatchNorm2d(c_out))
-        conv_layers.append(nn.ReLU(inplace=True))
-        conv_layers.append(nn.MaxPool2d(2, 2))
-        if cfg["dropout_conv"] > 0:
-            conv_layers.append(nn.Dropout2d(cfg["dropout_conv"]))
+        conv_layers += [
+            nn.Conv2d(c_in, c_mid, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c_mid),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c_mid, c_out, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c_out),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c_out, c_out, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(c_out),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(cfg["dropout_conv"]),
+        ]
         c_in = c_out
 
     features = nn.Sequential(*conv_layers)
 
-    # Càlcul automàtic de la mida del flatten
     with torch.no_grad():
         flat_size = features(torch.zeros(1, 1, 32, 32)).numel()
 
-    head_layers = []
-    if cfg["head"] == "gap":
-        head_layers += [nn.AdaptiveAvgPool2d(1), nn.Flatten()]
-        fc_in = c_in
-    else:
-        head_layers.append(nn.Flatten())
-        fc_in = flat_size
-
+    head_layers = [nn.Flatten()]
+    fc_in = flat_size
     for fc_out in cfg["fc_sizes"]:
-        head_layers.append(nn.Linear(fc_in, fc_out))
-        head_layers.append(nn.ReLU(inplace=True))
-        if cfg["dropout_fc"] > 0:
-            head_layers.append(nn.Dropout(cfg["dropout_fc"]))
+        head_layers += [
+            nn.Linear(fc_in, fc_out),
+            nn.ReLU(inplace=True),
+            nn.Dropout(cfg["dropout_fc"]),
+        ]
         fc_in = fc_out
-
     head_layers.append(nn.Linear(fc_in, n_classes))
     head = nn.Sequential(*head_layers)
 
@@ -179,37 +133,6 @@ def build_model(cfg, n_classes):
             return self.head(self.features(x))
 
     return Net()
-
-
-def build_optimizer(cfg, params):
-    lr, wd = cfg["lr"], cfg["weight_decay"]
-    if cfg["optimizer"] == "adam":
-        return optim.Adam(params, lr=lr, weight_decay=wd)
-    if cfg["optimizer"] == "adamw":
-        return optim.AdamW(params, lr=lr, weight_decay=wd)
-    if cfg["optimizer"] == "sgd":
-        return optim.SGD(params, lr=lr, momentum=0.9, weight_decay=wd, nesterov=True)
-    raise ValueError(f"optimizer desconegut: {cfg['optimizer']!r}")
-
-
-def build_scheduler(cfg, optimizer, steps_per_epoch):
-    if cfg["scheduler"] == "none":
-        return None
-    if cfg["scheduler"] == "reducelr":
-        return optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="min",
-            factor=cfg["reducelr_factor"],
-            patience=cfg["reducelr_patience"],
-        )
-    if cfg["scheduler"] == "onecycle":
-        return optim.lr_scheduler.OneCycleLR(
-            optimizer, max_lr=cfg["lr"],
-            steps_per_epoch=steps_per_epoch, epochs=cfg["max_epochs"],
-            pct_start=0.15, div_factor=10, final_div_factor=100,
-        )
-    if cfg["scheduler"] == "step":
-        return optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
-    raise ValueError(f"scheduler desconegut: {cfg['scheduler']!r}")
 
 
 @torch.no_grad()
@@ -245,9 +168,13 @@ if __name__ == "__main__":
     print()
 
     criterion = nn.CrossEntropyLoss(label_smoothing=CONFIG["label_smooth"])
-    optimizer = build_optimizer(CONFIG, model.parameters())
-    scheduler = build_scheduler(CONFIG, optimizer, len(train_loader))
-    scaler    = torch.amp.GradScaler("cuda", enabled=use_amp)
+    optimizer = optim.Adam(model.parameters(), lr=CONFIG["lr"], weight_decay=CONFIG["weight_decay"])
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min",
+        factor=CONFIG["reducelr_factor"],
+        patience=CONFIG["reducelr_patience"],
+    )
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     print(f"{'Epoch':>5}  {'Train Loss':>10}  {'Train Acc':>9}  "
           f"{'Val Loss':>8}  {'Val Acc':>7}  {'t(s)':>6}  {'LR':>8}")
@@ -281,10 +208,6 @@ if __name__ == "__main__":
             scaler.step(optimizer)
             scaler.update()
 
-            if scheduler is not None and CONFIG["scheduler"] == "onecycle":
-                if scheduler.last_epoch < scheduler.total_steps - 1:
-                    scheduler.step()
-
             loss_sum += loss.item() * len(labels)
             correct  += (out.argmax(1) == labels).sum().item()
             total    += len(labels)
@@ -297,12 +220,7 @@ if __name__ == "__main__":
         val_acc, val_loss     = evaluate(model, val_loader, criterion, device, use_amp)
         elapsed = time.time() - t_start
 
-        # Scheduler per època: reducelr necessita val_loss, step no necessita res
-        if scheduler is not None:
-            if CONFIG["scheduler"] == "reducelr":
-                scheduler.step(val_loss)
-            elif CONFIG["scheduler"] == "step":
-                scheduler.step()
+        scheduler.step(val_loss)
 
         current_lr = optimizer.param_groups[0]["lr"]
         print(f"{epoch:>5}  {train_loss:>10.4f}  {train_acc:>8.2%}  "
