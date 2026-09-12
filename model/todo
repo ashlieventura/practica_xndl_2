@@ -1,0 +1,4 @@
+- dataloader/cargar datos en RAM (fet)
+- transformaciones liniales para el dataaugmentation
+- cut data augmentation
+- 

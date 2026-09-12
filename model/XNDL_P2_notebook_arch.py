@@ -33,7 +33,8 @@ if torch.cuda.is_available():
 torch.backends.cudnn.benchmark = True
 
 # ---------- Hiperparàmetres ----------
-DATA_DIR   = "../dades"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, "..", "dades", "dades")
 BATCH_SIZE = 200          # mateix batch_size que al notebook (model.fit(..., batch_size=200))
 LR         = 1e-3         # Adam, com a l'original ('adam')
 TIME_LIMIT = 5 * 60 - 15

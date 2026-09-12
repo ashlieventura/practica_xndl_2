@@ -1,0 +1,5 @@
+config_id,augment_name,val_acc,elapsed_s,n_params,description
+0,erasing_small,0.8586,748,4654574,"RandomErasing amb parxos petits (2-10% de l'àrea). Obliga el model a no dependre d'una zona puntual, però deixa visible la major part de l'interior de l'objecte."
+2,cutout_center,0.8592,745,4654574,CutOut centrat: tapa una finestra fixa al centre de la imatge (on sol estar l'interior de l'objecte rodó). Força el model a inferir la classe des dels marges/textures.
+4,random_crop_zoom,0.8527,745,4654574,RandomResizedCrop: retalla entre el 60-100% de la imatge i escala fins a 32×32. Fa zoom en subregions i força el model a reconèixer l'objecte des d'un fragment parcial.
+6,multi_erase,0.8582,756,4654574,"Dos RandomErasing independents de mida petita (p=0.4 cadascun). En lloc d'un parxo gran, pot tapar dues zones petites diferents de l'interior. Menys agressiu però més diversificat espacialment."

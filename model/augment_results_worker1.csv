@@ -1,0 +1,4 @@
+config_id,augment_name,val_acc,elapsed_s,n_params,description
+1,erasing_medium,0.8604,759,4654574,RandomErasing amb parxos mitjans (8-20% de l'àrea). Pressió més forta: el model ha de reconèixer l'objecte amb part del centre esborrat.
+3,cutout_large,0.8588,753,4654574,"CutOut centrat gran (16px, ~25% de l'àrea). Versió agressiva: tapa la meitat central. Útil si el model s'ancora massa al centre."
+5,erasing_and_crop,0.8546,757,4654574,Combinació de RandomResizedCrop i RandomErasing mitjà. Doble pressió: el model veu fragments de l'objecte I amb zones esborrades. La combinació més agressiva de les provades.
